@@ -1,0 +1,9 @@
+{
+  "local": {
+	  "path":"C:\\Users\\stordahl\\downloads\\1mrun",
+	  "filter":"*.zip"
+  },
+  "blob": {
+	"connection":"DefaultEndpointsProtocol=https;AccountName=mchteststore20096;AccountKey=o9AFp23dEayWT8V5mxiLa9WoJ1iSlUVwa/Fi/pPCIFhjiXP6BMNqaS9zYekysT7++m6yc63wm9W+xqwm02EAtQ==;EndpointSuffix=core.windows.net",
+  }
+}
