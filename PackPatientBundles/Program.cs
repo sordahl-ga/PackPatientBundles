@@ -6,6 +6,8 @@ using Newtonsoft.Json.Linq;
 using System.Linq;
 using Azure.Storage.Blobs;
 using System.Threading;
+using System.Text;
+
 namespace PackPatientBundles
 {
     class Program
@@ -15,7 +17,7 @@ namespace PackPatientBundles
         {
             if (args.Length < 2)
             {
-                Console.WriteLine($"PackPatientBundles: usage packpatientbundles <pack|count|upload|export> <source path> [destpath or connectionstring] [resource types]");
+                Console.WriteLine($"PackPatientBundles: usage packpatientbundles <pack|count|upload|export|liveload> <source path> [destpath or connectionstring] [resource types]");
                 return;
             }
             string cd = args[1];
@@ -26,6 +28,22 @@ namespace PackPatientBundles
             }
             switch (args[0])
             {
+                case "liveload":
+                    if (args.Length < 4)
+                    {
+                        Console.WriteLine($"Must Provide a sourcedirectory, destination connection string and resources per minute to simulatelive loading");
+                        break;
+                    }
+                    if (!args[2].StartsWith("DefaultEndpointsProtocol"))
+                    {
+                        Console.WriteLine($"{args[2]} is not a valid Azure Storage Connection String");
+                        break;
+                    }
+                    if (int.TryParse(args[3], out int rate))
+                        simulateliveload(cd, args[2], rate);
+                    else
+                        Console.WriteLine($"{args[3]} is not a valid integer for rate of resources sent per minute");
+                    break;
                 case "export":
                     exportFHIRIDs(cd);
                     break;
@@ -50,7 +68,7 @@ namespace PackPatientBundles
                     }
                     if (!File.Exists(cd) || !cd.EndsWith(".zip"))
                     {
-                        Console.WriteLine($"PackPatientBundles: File {cd} does note exist or is not a zip file");
+                        Console.WriteLine($"PackPatientBundles: File {cd} does not exist or is not a zip file");
                         break;
                     }
                     string[] resources = s_resources.Split(",");
@@ -75,11 +93,16 @@ namespace PackPatientBundles
                             {
                                 StreamReader sr = new StreamReader(zipStream);
                                 string contents = sr.ReadToEnd();
-                                int incresources = processContents(entry.Name, contents, rv, resources);
-                                if (incresources > 0)
+                                JObject bundle = TransformBundle(contents);
+                                JArray entries = (JArray)bundle["entry"];
+                                foreach (JToken tok in entries)
                                 {
-                                    bundlecnt += incresources;
-                                    if (bundlecnt >= 250)
+                                    string rt = tok["resource"]["resourceType"].ToString();
+                                    if (resources.Contains(rt)) { 
+                                            addResource(rv, tok["resource"]);
+                                            bundlecnt++;
+                                    }
+                                    if (bundlecnt >= 300)
                                     {
                                         string fn = $"bundle{Guid.NewGuid().ToString().Replace("-", "")}.json";
                                         ZipArchiveEntry fileentry = destarch.CreateEntry(fn);
@@ -94,7 +117,7 @@ namespace PackPatientBundles
                                         bundlecnt = 0;
                                         rv = null;
                                         rv = initBundle();
-                                        if (destzipentries > 200)
+                                        if (destzipentries >= 200)
                                         {
                                             destarch.Dispose();
                                             zipToCreate = new FileStream($"{dest}-{zipfileno++}.zip", FileMode.Create);
@@ -140,7 +163,7 @@ namespace PackPatientBundles
                     uploadtoblob(cd, args[2]);
                     break;
                 default:
-                    Console.WriteLine($"PackPatientBundles: usage packpatientbundles <pack|count|upload> <source path> [destpath or connectionstring] [resource types]");
+                    Console.WriteLine($"PackPatientBundles: usage packpatientbundles <pack|count|upload|export> <source path> [destpath or connectionstring] [resource types]");
                     break;
             }
         }
@@ -310,6 +333,61 @@ namespace PackPatientBundles
             }
 
         }
+        public static void simulateliveload(string source,string connectstring,int resourcesperminute)
+        {
+            if (!Directory.Exists(source))
+            {
+                Console.WriteLine($"Path {source} does not exist...");
+            }
+            string filter = "*.zip";
+            // Create a BlobServiceClient object which will be used to create a container client
+            BlobServiceClient blobServiceClient = new BlobServiceClient(connectstring);
+            //Bulk Loader Zip Container 
+            string bundleName = "bundles";
+            // Create the container and return a container client object
+            BlobContainerClient bundleClient = blobServiceClient.GetBlobContainerClient(bundleName);
+            DateTime start = DateTime.Now;
+            Console.WriteLine($"Uploading from {filter} files in {source}...");
+            int bundlecnt = 0;
+            foreach (var filename in Directory.EnumerateFiles(source, filter))
+            {
+                using (ZipArchive archive = new ZipArchive(File.OpenRead(filename)))
+                {
+                    foreach (ZipArchiveEntry entry in archive.Entries)
+                    {
+                        using (var zipStream = entry.Open())
+                        {
+                            StreamReader sr = new StreamReader(zipStream);
+                            string contents = sr.ReadToEnd();
+                            var o = JObject.Parse(contents);
+                            JArray arr = (JArray)o["entry"];
+                            if (arr != null) bundlecnt += arr.Count;
+                            Console.WriteLine($"Sending...{arr.Count} resources from {entry.Name}...");
+                            byte[] byteArray = Encoding.UTF8.GetBytes(contents);
+                            MemoryStream stream = new MemoryStream(byteArray);
+                            BlobClient blobClient = bundleClient.GetBlobClient(entry.Name);
+                            blobClient.Upload(stream, true);
+                            stream.Close();
+                            if (bundlecnt >= resourcesperminute)
+                            {
+                                int tc = 60;
+                                while (tc > 0)
+                                {
+                                    Console.Write($"\rAllowing {tc.ToString("D2")} seconds between {resourcesperminute} resources...");
+                                    Thread.Sleep(1000);
+                                    tc--;
+                                }
+                                blobsinqueue(bundleClient, 50);
+                                bundlecnt = 0;
+                            }
+                        }
+                    }
+                }
+            }
+            DateTime stop = DateTime.Now;
+            TimeSpan ts = stop.Subtract(start);
+            Console.WriteLine($"Completed uploading {filter} files to blob storage account in {ts.TotalMinutes} minutes.");
+        }
         public static void uploadtoblob(string source,string connectstring)
         {
             if (!Directory.Exists(source))
@@ -352,32 +430,7 @@ namespace PackPatientBundles
 
         }
         
-        public static int processContents(string filename,string contents,JObject rv,string[] resources)
-        {
-           
-            try
-            {
-                int resincluded = 0;
-                JObject bundle = TransformBundle(contents);
-                JArray entries = (JArray)bundle["entry"];
-                foreach (JToken tok in entries)
-                {
-                    string rt = tok["resource"]["resourceType"].ToString();
-                    if (resources.Contains(rt))
-                    {
-                        addResource(rv, tok["resource"]);
-                        resincluded++;
-                    }
-                }
-                return resincluded;
-            }
-
-            catch (Exception e)
-            {
-                Console.WriteLine($"{filename} is not a valid JSON File.");
-                return 0;
-            }
-        }
+        
         public static JObject TransformBundle(string contents)
         {
             JObject result = JObject.Parse(contents);
@@ -451,6 +504,28 @@ namespace PackPatientBundles
             rv["request"] = req;
             JArray entries = (JArray)bundle["entry"];
             entries.Add(rv);
+        }
+        public static List<IncludedResource> ResetIncludedCounts(List<IncludedResource> incr)
+        {
+            foreach(IncludedResource i in incr)
+            {
+                i.Sampled = 0;
+            }
+            return incr;
+        }
+    }
+    public class IncludedResource
+    {
+        public string Resource { get; set; }
+        public int SampleSize { get; set; }
+        public int Sampled { get; set; }
+        public bool Increment(int size = 1)
+        {
+            if (this.SampleSize < 0 || (this.Sampled + size <= this.SampleSize)) {
+                this.Sampled++;
+                return true;
+            }
+            return false;
         }
     }
 }

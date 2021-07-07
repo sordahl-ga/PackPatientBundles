@@ -2,7 +2,7 @@
   "profiles": {
     "PackPatientBundles": {
       "commandName": "Project",
-      "commandLineArgs": "export C:\\Users\\stordahl\\Downloads\\patexport"
+      "commandLineArgs": "liveload C:\\Users\\stordahl\\Downloads\\testlive \"DefaultEndpointsProtocol=https;AccountName=mchteststore20096;AccountKey=o9AFp23dEayWT8V5mxiLa9WoJ1iSlUVwa/Fi/pPCIFhjiXP6BMNqaS9zYekysT7++m6yc63wm9W+xqwm02EAtQ==;EndpointSuffix=core.windows.net\" 450"
     }
   }
 }
