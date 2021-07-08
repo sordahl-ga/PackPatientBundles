@@ -79,11 +79,17 @@ namespace PackPatientBundles
                     int compfilecnt = 0;
                     int destzipentries = 0;
                     int zipfileno = 1;
+                    if (!IsZipValid(cd))
+                    {
+                        Console.WriteLine($"{cd} is not a valid zip archive.");
+                        break;
+                    }
                     Console.WriteLine($"Processing JSON files in {cd}...Packing these resources {s_resources}...");
 
                     using (ZipArchive archive = new ZipArchive(File.OpenRead(cd)))
                     {
-                        FileStream zipToCreate = new FileStream($"{dest}-{zipfileno++}.zip", FileMode.Create);
+                        FileStream zipToCreate = new FileStream($"{dest}-{zipfileno++.ToString("D4")}.zip", FileMode.Create);
+                        string zipbundle = $"bundle{Guid.NewGuid().ToString().Replace("-", "")}";
                         ZipArchive destarch = new ZipArchive(zipToCreate, ZipArchiveMode.Update);
                         foreach (ZipArchiveEntry entry in archive.Entries)
                         {
@@ -93,7 +99,16 @@ namespace PackPatientBundles
                             {
                                 StreamReader sr = new StreamReader(zipStream);
                                 string contents = sr.ReadToEnd();
-                                JObject bundle = TransformBundle(contents);
+                                JObject bundle = null;
+                                try
+                                {
+                                    bundle = TransformBundle(contents);
+                                }
+                                catch(Exception e)
+                                {
+                                    Console.WriteLine($"{entry.Name} error transforming bundle:{e.Message} will not process");
+                                    continue;
+                                }
                                 JArray entries = (JArray)bundle["entry"];
                                 foreach (JToken tok in entries)
                                 {
@@ -104,25 +119,25 @@ namespace PackPatientBundles
                                     }
                                     if (bundlecnt >= 300)
                                     {
-                                        string fn = $"bundle{Guid.NewGuid().ToString().Replace("-", "")}.json";
+                                        destzipentries++;
+                                        string fn = $"{zipbundle}-{destzipentries.ToString("D8")}.json";
                                         ZipArchiveEntry fileentry = destarch.CreateEntry(fn);
                                         using (StreamWriter writer = new StreamWriter(fileentry.Open()))
                                         {
                                             writer.Write(rv.ToString());
                                         }
-                                        destzipentries++;
+                                        
                                         compfilecnt++;
                                         total += bundlecnt;
                                         UpdateCon(filecnt, total, compfilecnt);
                                         bundlecnt = 0;
                                         rv = null;
                                         rv = initBundle();
-                                        if (destzipentries >= 200)
+                                        if (destzipentries % 200==0)
                                         {
                                             destarch.Dispose();
-                                            zipToCreate = new FileStream($"{dest}-{zipfileno++}.zip", FileMode.Create);
+                                            zipToCreate = new FileStream($"{dest}-{zipfileno++.ToString("D4")}.zip", FileMode.Create);
                                             destarch = new ZipArchive(zipToCreate, ZipArchiveMode.Update);
-                                            destzipentries = 0;
                                         }
 
                                     }
@@ -133,7 +148,8 @@ namespace PackPatientBundles
 
                         if (bundlecnt > 0)
                         {
-                            string fn = $"bundle{Guid.NewGuid().ToString().Replace("-", "")}.json";
+                            destzipentries++;
+                            string fn = $"{zipbundle}-{destzipentries.ToString("D8")}.json";
                             ZipArchiveEntry fileentry = destarch.CreateEntry(fn);
                             using (StreamWriter writer = new StreamWriter(fileentry.Open()))
                             {
@@ -147,7 +163,7 @@ namespace PackPatientBundles
                       
                     }
 
-                    Console.WriteLine($"Finshed processing {filecnt} files with export of {total} resources packedinto {compfilecnt} files in {zipfileno-1} zip files...");
+                    Console.WriteLine($"Finshed processing {filecnt} files with export of {total} resources packedinto {compfilecnt} bundles in {zipfileno-1} zip files...");
                     break;
                 case "upload":
                     if (args.Length < 3)
@@ -170,7 +186,7 @@ namespace PackPatientBundles
        
         public static void UpdateCon(int filecnt,int total,int compfilecnt)
         {
-            Console.Write($"\rProcessed {filecnt} files with {total} resources packedinto {compfilecnt} files...");
+            Console.Write($"\rProcessed {filecnt} files with {total} resources packedinto {compfilecnt} bundles...");
         }
         public static void cleanup(string cd)
         {
@@ -213,8 +229,12 @@ namespace PackPatientBundles
                     filecnt++;
                     grand += countResources(filename);
                 }
+                Console.WriteLine($"Grand total of all resources contained in {filecnt} zip files is {grand}");
+            } else
+            {
+                Console.WriteLine($"Directory {cd} does not exist or is invalid");
             }
-            Console.WriteLine($"Grand total of all resources contained in {filecnt} zip files is {grand}");
+           
         }
         public static void exportFHIRIDs(string cd)
         {
@@ -252,9 +272,29 @@ namespace PackPatientBundles
                 Console.WriteLine($"Directory {cd} is invalid");
             }
         }
+        public static bool IsZipValid(string path)
+        {
+            try
+            {
+                using (var zipFile = ZipFile.OpenRead(path))
+                {
+                    var entries = zipFile.Entries;
+                    return true;
+                }
+            }
+            catch (InvalidDataException)
+            {
+                return false;
+            }
+        }
         public static int countResources(string filename)
         {
-            Console.WriteLine($"Counting resources contained in bundles {filename}...");
+            if (!IsZipValid(filename))
+            {
+                Console.WriteLine($"{filename} is not a valid zipfile");
+                return 0;
+            }
+            Console.WriteLine($"Counting resources contained in bundles from {filename}...");
             int filecnt = 0;
             int total = 0;
             Dictionary<string, int> countByResourceType = new Dictionary<string, int>();
@@ -269,10 +309,19 @@ namespace PackPatientBundles
                         string contents = sr.ReadToEnd();
                         if (string.IsNullOrEmpty(contents))
                         {
-                            Console.WriteLine($"{entry.Name} is empty or invalid.");
+                            Console.WriteLine($"{entry.Name} is empty or invalid and will not be processed");
                             continue;
                         }
-                        JObject bundle = JObject.Parse(contents);
+                        JObject bundle = null;
+                        try
+                        {
+                            bundle = JObject.Parse(contents);
+                        }
+                        catch (Newtonsoft.Json.JsonReaderException be)
+                        {
+                            Console.WriteLine($"{entry.Name} contains invalid JSON:{be.Message} and will not be processed");
+                            continue;
+                        }
                         JArray entries = (JArray)bundle["entry"];
                         foreach (JToken tok in entries)
                         {
@@ -299,16 +348,7 @@ namespace PackPatientBundles
 
         }
 
-        public static void splitzips(string filename, int maxfilesperzip = 300)
-        {
-            using (ZipArchive archive = new ZipArchive(File.OpenRead(filename)))
-            {
-                if (archive.Entries.Count > maxfilesperzip)
-                {
-
-                }
-            }
-        }
+        
         private static void blobsinqueue(BlobContainerClient client, int holdthreshold = -1, int delayms=5000)
         {
             Console.Write("Checking outstanding blobs queue...");
@@ -349,8 +389,13 @@ namespace PackPatientBundles
             DateTime start = DateTime.Now;
             Console.WriteLine($"Uploading from {filter} files in {source}...");
             int bundlecnt = 0;
-            foreach (var filename in Directory.EnumerateFiles(source, filter))
+            foreach (var filename in Directory.EnumerateFiles(source, filter).OrderBy(s => s))
             {
+                if (!IsZipValid(filename))
+                {
+                    Console.WriteLine($"{filename} is not a valid zip file and will not be processed");
+                    continue;
+                }
                 using (ZipArchive archive = new ZipArchive(File.OpenRead(filename)))
                 {
                     foreach (ZipArchiveEntry entry in archive.Entries)
@@ -359,7 +404,16 @@ namespace PackPatientBundles
                         {
                             StreamReader sr = new StreamReader(zipStream);
                             string contents = sr.ReadToEnd();
-                            var o = JObject.Parse(contents);
+                            JObject o = null;
+                            try
+                            {
+                                o = JObject.Parse(contents);
+                            }
+                            catch (Newtonsoft.Json.JsonReaderException be)
+                            {
+                                Console.WriteLine($"{entry.Name} contains invalid JSON and will not be processed");
+                                continue;
+                            }
                             JArray arr = (JArray)o["entry"];
                             if (arr != null) bundlecnt += arr.Count;
                             Console.WriteLine($"Sending...{arr.Count} resources from {entry.Name}...");
@@ -434,7 +488,7 @@ namespace PackPatientBundles
         public static JObject TransformBundle(string contents)
         {
             JObject result = JObject.Parse(contents);
-            if (result == null || result["resourceType"] == null || result["type"] == null) throw new Exception("Not a valid bundle json file");
+            if (result == null || result["resourceType"] == null || result["type"] == null) throw new Exception("Not a valid FHIR resource");
             string rtt = result["resourceType"].ToString();
             string bt = (string)result["type"];
             if (rtt.Equals("Bundle") && bt.Equals("transaction"))
